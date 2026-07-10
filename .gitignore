@@ -1,0 +1,21 @@
+# Environment / secrets
+.env
+.cursor/
+
+# uv / Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Database (local data, not for version control)
+*.db
+*.db-shm
+*.db-wal
+
+# Exports
+*.csv
+*.json
+!.env.example

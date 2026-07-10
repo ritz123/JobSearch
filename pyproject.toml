@@ -1,0 +1,14 @@
+[project]
+name = "linkedin-job-scraper"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "apify-client",
+    "python-dotenv",
+    "pandas",
+    "tabulate",
+    "streamlit",
+    "plotly",
+]
+
+[tool.uv]
