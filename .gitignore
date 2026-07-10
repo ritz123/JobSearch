@@ -3,6 +3,7 @@
 .cursor/
 
 # uv / Python
+uv.lock
 .venv/
 __pycache__/
 *.py[cod]
