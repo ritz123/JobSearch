@@ -1,0 +1,7 @@
+[server]
+# Project lives on NFS. Both "auto" (watchdog) and "poll" file watchers
+# segfault the Streamlit process here (exit 139). Disable watching.
+fileWatcherType = "none"
+
+[browser]
+gatherUsageStats = false

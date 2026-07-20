@@ -11,7 +11,12 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from database import DEFAULT_DB, get_stats, query_jobs
+from database import DEFAULT_DB, get_stats, init_db, query_jobs
+from posted_dates import format_published_display, sort_key_published
+
+# Pandas 3 defaults to Arrow-backed strings; building DataFrames from sqlite rows
+# can segfault in string_arrow._from_sequence (seen when filtering e.g. "SEO").
+pd.options.future.infer_string = False
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -24,6 +29,7 @@ st.set_page_config(
 )
 
 DB_PATH = DEFAULT_DB
+init_db(DB_PATH)  # ensures schema + migrates stale relative published_at values
 
 # ---------------------------------------------------------------------------
 # Cached data loaders
@@ -36,6 +42,8 @@ def load_jobs(
     company: str,
     location: str,
     workplace: str | None,
+    source: str | None,
+    posted_within: str | None,
     limit: int,
 ) -> pd.DataFrame:
     rows = query_jobs(
@@ -43,12 +51,15 @@ def load_jobs(
         company=company or None,
         location=location or None,
         workplace=workplace or None,
+        source=source,
+        posted_within=posted_within,
         limit=limit,
         db_path=DB_PATH,
     )
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame([dict(r) for r in rows])
+    # dtype=object avoids Arrow string arrays (pandas 3 segfault risk).
+    return pd.DataFrame([dict(r) for r in rows], dtype=object)
 
 
 @st.cache_data(ttl=60)
@@ -71,6 +82,48 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue().encode()
 
 
+def stringify_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with every cell as a plain Python str (no Arrow dtypes)."""
+    if df.empty:
+        return df
+    out = pd.DataFrame(index=df.index)
+    for col in df.columns:
+        out[col] = [
+            "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v)
+            for v in df[col].tolist()
+        ]
+    return out
+
+
+def sort_jobs_df(df: pd.DataFrame, sort_by: str, ascending: bool) -> pd.DataFrame:
+    """Sort display rows; Published sorts by absolute post time.
+
+    For Published, ``ascending=True`` means Newest first (UI convention).
+    """
+    if df.empty or sort_by not in df.columns:
+        return df
+    out = df.copy()
+    if sort_by == "Published":
+        scraped = out["_scraped_at"] if "_scraped_at" in out.columns else [None] * len(out)
+        keys = [
+            sort_key_published(pub, ref)
+            for pub, ref in zip(out["_published_raw"].tolist(), scraped.tolist())
+        ]
+        # UI ascending=True (Newest first) => larger epoch first
+        out = out.assign(_epoch=keys).sort_values(
+            by="_epoch",
+            ascending=not ascending,
+            kind="mergesort",
+        ).drop(columns=["_epoch"])
+        return out.reset_index(drop=True)
+    return out.sort_values(
+        by=sort_by,
+        ascending=ascending,
+        kind="mergesort",
+        key=lambda s: s.astype(str).str.lower(),
+    ).reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # Sidebar — filters
 # ---------------------------------------------------------------------------
@@ -83,15 +136,22 @@ st.sidebar.caption("Comma-separated: Google, Meta, Stripe")
 location_input = st.sidebar.text_input("Location", placeholder="e.g. San Francisco")
 workplace_options = ["All", "Remote", "On-site", "Hybrid"]
 workplace_input = st.sidebar.selectbox("Workplace type", workplace_options)
+source_input = st.sidebar.selectbox("Source", ["All", "linkedin", "naukri"])
+posted_labels = {
+    "Any": "any",
+    "Past 24 hours": "24h",
+    "Past 3 days": "3d",
+    "Past week": "week",
+    "Past month": "month",
+}
+posted_input = st.sidebar.selectbox("Posted", list(posted_labels.keys()))
 st.sidebar.caption("Filters results already in the database.")
 max_results = st.sidebar.number_input("Max results", min_value=1, max_value=500, value=100, step=10)
-apply_btn = st.sidebar.button("Apply Filters", type="primary", use_container_width=True)
+apply_btn = st.sidebar.button("Apply Filters", type="primary", width="stretch")
 
 st.sidebar.info(
-    "**Why no multi-select for job type or experience?**  \n"
-    "The `automation-lab/linkedin-jobs-scraper` actor only accepts a single enum value "
-    "for `jobType`, `workplaceType`, and `experienceLevel`. Run multiple searches to "
-    "cover different filter combinations.",
+    "**Sources:** LinkedIn and Naukri scrapes share this database. "
+    "Use the Source filter to view one board, or All for both.",
     icon="ℹ️",
 )
 
@@ -102,15 +162,20 @@ if "filters" not in st.session_state:
         "company": "",
         "location": "",
         "workplace": None,
+        "source": None,
+        "posted_within": None,
         "limit": 100,
     }
 
 if apply_btn:
+    posted_key = posted_labels[posted_input]
     st.session_state.filters = {
         "keyword": kw_input,
         "company": company_input,
         "location": location_input,
         "workplace": None if workplace_input == "All" else workplace_input,
+        "source": None if source_input == "All" else source_input,
+        "posted_within": None if posted_key == "any" else posted_key,
         "limit": int(max_results),
     }
 
@@ -118,7 +183,7 @@ if apply_btn:
 # Main area
 # ---------------------------------------------------------------------------
 
-st.title("💼 LinkedIn Jobs Explorer")
+st.title("💼 Jobs Explorer")
 
 if not db_exists():
     st.info(
@@ -133,6 +198,8 @@ jobs_df = load_jobs(
     company=f["company"],
     location=f["location"],
     workplace=f["workplace"],
+    source=f.get("source"),
+    posted_within=f.get("posted_within"),
     limit=f["limit"],
 )
 stats = load_stats()
@@ -150,34 +217,88 @@ with tab1:
         st.warning("No jobs match the current filters.")
     else:
         display_cols = [
-            "title", "company", "location", "workplace_type",
+            "source", "title", "company", "location", "workplace_type",
             "contract_type", "published_at", "salary", "job_url",
         ]
         # Keep only columns that exist (defensive)
         display_cols = [c for c in display_cols if c in jobs_df.columns]
-        display_df = jobs_df[display_cols].copy()
+        display_df = stringify_df(jobs_df[display_cols]).rename(columns={
+            "source": "Source",
+            "title": "Title",
+            "company": "Company",
+            "location": "Location",
+            "workplace_type": "Workplace",
+            "contract_type": "Contract",
+            "published_at": "Published",
+            "salary": "Salary",
+            "job_url": "Link",
+        })
+        # Keep raw values for absolute-date sort / display (relative strings are stale).
+        display_df["_published_raw"] = jobs_df["published_at"].tolist()
+        display_df["_scraped_at"] = (
+            jobs_df["scraped_at"].tolist()
+            if "scraped_at" in jobs_df.columns
+            else [None] * len(display_df)
+        )
+        display_df["Published"] = [
+            format_published_display(pub, ref)
+            for pub, ref in zip(
+                display_df["_published_raw"].tolist(),
+                display_df["_scraped_at"].tolist(),
+            )
+        ]
 
-        st.caption(f"**{len(display_df):,}** job(s) found")
+        sort_cols = [c for c in (
+            "Published", "Source", "Title", "Company", "Location", "Workplace", "Contract", "Salary",
+        ) if c in display_df.columns]
 
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "title": st.column_config.TextColumn("Title", width="large"),
-                "company": st.column_config.TextColumn("Company"),
-                "location": st.column_config.TextColumn("Location"),
-                "workplace_type": st.column_config.TextColumn("Workplace"),
-                "contract_type": st.column_config.TextColumn("Contract"),
-                "published_at": st.column_config.TextColumn("Published"),
-                "salary": st.column_config.TextColumn("Salary"),
-                "job_url": st.column_config.LinkColumn("Link", display_text="Open ↗"),
-            },
+        sort_left, sort_right = st.columns(2)
+        with sort_left:
+            sort_by = st.selectbox(
+                "Sort by",
+                sort_cols,
+                index=sort_cols.index("Published") if "Published" in sort_cols else 0,
+                key="jobs_sort_by",
+            )
+        with sort_right:
+            if sort_by == "Published":
+                order_label = st.selectbox(
+                    "Order",
+                    ["Newest first", "Oldest first"],
+                    key="jobs_sort_order_published",
+                )
+                ascending = order_label == "Newest first"
+            else:
+                order_label = st.selectbox(
+                    "Order",
+                    ["A → Z", "Z → A"],
+                    key="jobs_sort_order_alpha",
+                )
+                ascending = order_label == "A → Z"
+
+        display_df = sort_jobs_df(display_df, sort_by, ascending)
+        export_df = display_df.drop(
+            columns=[c for c in ("_published_raw", "_scraped_at") if c in display_df.columns]
+        )
+
+        st.caption(f"**{len(export_df):,}** job(s) found")
+
+        # Avoid st.dataframe/st.table: both marshal via pyarrow and can SIGSEGV
+        # with pandas 3 + pyarrow 25 on this environment when filtering (e.g. SEO).
+        html_df = export_df.copy()
+        if "Link" in html_df.columns:
+            html_df["Link"] = [
+                f'<a href="{url}" target="_blank" rel="noopener">Open</a>' if url else ""
+                for url in html_df["Link"]
+            ]
+        st.markdown(
+            html_df.to_html(escape=False, index=False),
+            unsafe_allow_html=True,
         )
 
         st.download_button(
             label="⬇ Download CSV",
-            data=to_csv_bytes(display_df),
+            data=to_csv_bytes(export_df),
             file_name="linkedin_jobs.csv",
             mime="text/csv",
         )
@@ -222,7 +343,7 @@ with tab2:
                 yaxis={"categoryorder": "total ascending"},
                 margin={"l": 0, "r": 0, "t": 10, "b": 0},
             )
-            st.plotly_chart(fig_comp, use_container_width=True)
+            st.plotly_chart(fig_comp, width="stretch")
         else:
             st.info("No company data available.")
 
@@ -246,7 +367,7 @@ with tab2:
                 yaxis={"categoryorder": "total ascending"},
                 margin={"l": 0, "r": 0, "t": 10, "b": 0},
             )
-            st.plotly_chart(fig_loc, use_container_width=True)
+            st.plotly_chart(fig_loc, width="stretch")
         else:
             st.info("No location data available.")
 
@@ -271,7 +392,7 @@ with tab2:
                 showlegend=True,
                 margin={"l": 0, "r": 0, "t": 10, "b": 0},
             )
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width="stretch")
         else:
             st.info("No workplace distribution data available.")
 
@@ -279,17 +400,18 @@ with tab2:
     with search_col:
         st.markdown("**Recent Searches**")
         if stats["recent_searches"]:
-            rs_df = pd.DataFrame(stats["recent_searches"])
+            rs_df = stringify_df(pd.DataFrame(stats["recent_searches"], dtype=object))
+            keep = [c for c in ("keywords", "location", "job_count", "ran_at") if c in rs_df.columns]
+            rs_df = rs_df[keep]
             rs_df = rs_df.rename(columns={
                 "keywords": "Keywords",
                 "location": "Location",
                 "job_count": "Jobs",
                 "ran_at": "Timestamp",
             })
-            # Trim timestamp to readable format
             if "Timestamp" in rs_df.columns:
-                rs_df["Timestamp"] = rs_df["Timestamp"].str[:19].str.replace("T", " ")
-            st.dataframe(rs_df, use_container_width=True, hide_index=True)
+                rs_df["Timestamp"] = [t[:19].replace("T", " ") for t in rs_df["Timestamp"]]
+            st.markdown(rs_df.to_html(escape=True, index=False), unsafe_allow_html=True)
         else:
             st.info("No search history yet.")
 
@@ -325,7 +447,10 @@ with tab3:
             st.markdown(f"**📄 Contract:** {job.get('contract_type', 'N/A')}")
 
         with detail_col2:
-            st.markdown(f"**📅 Published:** {job.get('published_at', 'N/A')}")
+            st.markdown(
+                f"**📅 Published:** "
+                f"{format_published_display(job.get('published_at'), job.get('scraped_at'))}"
+            )
             salary = job.get("salary")
             st.markdown(f"**💰 Salary:** {salary if salary else 'Not listed'}")
             job_url = job.get("job_url")

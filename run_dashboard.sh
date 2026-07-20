@@ -8,4 +8,7 @@ if [[ ! -f "$SCRIPT_DIR/.venv/bin/activate" ]]; then
     bash "$SCRIPT_DIR/setup.sh"
 fi
 
-exec uv run streamlit run "$SCRIPT_DIR/app.py" --server.port 8501 --server.headless false
+exec uv run streamlit run "$SCRIPT_DIR/app.py" \
+    --server.port 8501 \
+    --server.headless false \
+    --server.fileWatcherType none

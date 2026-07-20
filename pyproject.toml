@@ -11,4 +11,12 @@ dependencies = [
     "plotly",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
 [tool.uv]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
