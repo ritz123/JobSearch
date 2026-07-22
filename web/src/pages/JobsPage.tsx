@@ -170,6 +170,7 @@ export default function JobsPage() {
             <option value="linkedin">linkedin</option>
             <option value="naukri">naukri</option>
             <option value="indeed">indeed</option>
+            <option value="shine">shine</option>
             <option value="company_site">company_site</option>
           </select>
         </label>

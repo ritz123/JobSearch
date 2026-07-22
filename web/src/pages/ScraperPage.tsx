@@ -142,7 +142,7 @@ export default function ScraperPage() {
     <div className="page">
       <h1>Run Scraper</h1>
       <p className="muted">
-        Scrape LinkedIn, Naukri, or Indeed via Apify. Load a past search to edit it, or Rerun
+        Scrape LinkedIn, Naukri, Indeed, or Shine via Apify. Load a past search to edit it, or Rerun
         immediately.
       </p>
 
@@ -156,6 +156,7 @@ export default function ScraperPage() {
             <option value="linkedin">linkedin</option>
             <option value="naukri">naukri</option>
             <option value="indeed">indeed</option>
+            <option value="shine">shine</option>
           </select>
         </label>
         <label>

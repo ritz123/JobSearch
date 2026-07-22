@@ -1,10 +1,10 @@
 # JobSearch — Apify scrapers + React dashboard
 
-Scrapes LinkedIn / Naukri job listings via [Apify](https://apify.com), stores them in local SQLite, and provides a **React** web UI (FastAPI backend) plus CLI tools.
+Scrapes LinkedIn / Naukri / Indeed / Shine job listings via [Apify](https://apify.com), stores them in local SQLite, and provides a **React** web UI (FastAPI backend) plus CLI tools.
 
 ## Features
 
-- **Apify-powered scraping** — LinkedIn and Naukri
+- **Apify-powered scraping** — LinkedIn, Naukri, Indeed, Shine
 - **SQLite storage with deduplication**
 - **React dashboard** — Jobs explorer, Run Scraper, City Careers (OSM + Ollama)
 - **CLI tools** — `query.py`, `scraper.py`

@@ -18,8 +18,10 @@ def test_get_adapter_linkedin_and_naukri():
     assert get_adapter("linkedin").name == "linkedin"
     assert get_adapter("naukri").name == "naukri"
     assert get_adapter("indeed").name == "indeed"
+    assert get_adapter("shine").name == "shine"
     assert "naukri" in get_adapter("naukri").actor_id
     assert "indeed" in get_adapter("indeed").actor_id
+    assert "shine" in get_adapter("shine").actor_id
 
 
 def test_sanitize_naukri_location_strips_linkedin_style():
@@ -232,3 +234,67 @@ def test_indeed_build_input_and_normalize():
     assert job["location"] == "Bengaluru, Karnataka"
     assert job["workplaceType"] == "remote"
     assert job["salary"] == "₹5L - ₹8L"
+
+
+def test_shine_build_input_and_normalize():
+    from sources.shine import ShineSource, sanitize_shine_location
+
+    city, inferred = sanitize_shine_location("Bangalore, remote")
+    assert city == "Bangalore"
+    assert inferred == "remote"
+    assert sanitize_shine_location("remote")[0] == ""
+
+    args = SimpleNamespace(
+        keywords="SEO",
+        location="Bangalore, remote",
+        max_jobs=25,
+        workplace="remote",
+        date_posted="week",
+        details=True,
+        sort_recent=False,
+    )
+    src = ShineSource()
+    run_input = src.build_input(args)
+    assert run_input["searchQuery"] == "SEO"
+    assert run_input["location"] == "Bangalore"
+    assert run_input["maxItems"] == 25
+    assert run_input["daysOld"] == 7
+    assert run_input["fetchDetails"] is True
+
+    items = src.normalize_items(
+        [
+            {
+                "id": "19049753",
+                "url": "https://www.shine.com/job/seo/acme/19049753",
+                "title": "SEO Analyst",
+                "company": "Acme",
+                "locations": ["Bangalore"],
+                "city": "Bangalore",
+                "workMode": "Remote",
+                "jobType": "Full-time",
+                "employmentType": "Regular",
+                "salaryRaw": "Rs 5 - 8 Lakh/Yr",
+                "descriptionText": "Own organic search.",
+                "publishDateISO": "2026-05-05T07:41:22.000Z",
+            },
+            {
+                "id": "19049754",
+                "url": "https://www.shine.com/job/seo/beta/19049754",
+                "title": "SEO Lead",
+                "company": "Beta",
+                "city": "Mumbai",
+                "workMode": "On-site",
+                "jobType": "Full-time",
+                "publishDate": "2026-05-01",
+            },
+        ]
+    )
+    assert len(items) == 1
+    job = items[0]
+    assert job["source"] == "shine"
+    assert job["id"] == "19049753"
+    assert job["companyName"] == "Acme"
+    assert job["location"] == "Bangalore"
+    assert job["workplaceType"] == "remote"
+    assert job["salary"] == "Rs 5 - 8 Lakh/Yr"
+    assert job["postedAt"] == "2026-05-05T07:41:22.000Z"

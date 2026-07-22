@@ -149,19 +149,20 @@ def print_summary(df: pd.DataFrame) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Job Scraper — LinkedIn, Naukri & Indeed via Apify",
+        description="Job Scraper — LinkedIn, Naukri, Indeed & Shine via Apify",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python scraper.py --source linkedin --keywords "data engineer" --location "San Francisco"
   python scraper.py --source naukri --keywords "python developer" --location "bangalore" --max-jobs 50
   python scraper.py --source indeed --keywords "SEO" --location "Bangalore" --country in --max-jobs 25
+  python scraper.py --source shine --keywords "SEO" --location "Bangalore" --max-jobs 25
         """,
     )
 
     parser.add_argument(
         "--source",
-        choices=["linkedin", "naukri", "indeed"],
+        choices=["linkedin", "naukri", "indeed", "shine"],
         default="linkedin",
         help="Job board to scrape (default: linkedin)",
     )

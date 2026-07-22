@@ -17,11 +17,13 @@ def get_adapter(source: str) -> SourceAdapter:
     from sources.indeed import IndeedSource
     from sources.linkedin import LinkedInSource
     from sources.naukri import NaukriSource
+    from sources.shine import ShineSource
 
     adapters = {
         LinkedInSource.name: LinkedInSource(),
         NaukriSource.name: NaukriSource(),
         IndeedSource.name: IndeedSource(),
+        ShineSource.name: ShineSource(),
     }
     try:
         return adapters[source]
