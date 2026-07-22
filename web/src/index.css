@@ -1,0 +1,68 @@
+:root {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  line-height: 1.45;
+  color: #1a1f2e;
+  background: #f3f5f8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: #1d4ed8;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: #1d4ed8;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0.55rem 0.9rem;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  background: #027a48;
+  color: #fff !important;
+  text-decoration: none;
+  border-radius: 8px;
+  padding: 0.55rem 0.9rem;
+}
+
+.button-link:hover {
+  filter: brightness(1.05);
+}
+
+input,
+select {
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid #c9d0db;
+  border-radius: 8px;
+  background: #fff;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}

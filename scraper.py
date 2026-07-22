@@ -149,24 +149,29 @@ def print_summary(df: pd.DataFrame) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Job Scraper — LinkedIn & Naukri via Apify",
+        description="Job Scraper — LinkedIn, Naukri & Indeed via Apify",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python scraper.py --source linkedin --keywords "data engineer" --location "San Francisco"
   python scraper.py --source naukri --keywords "python developer" --location "bangalore" --max-jobs 50
-  python scraper.py --source naukri --keywords "SEO" --location "bangalore" --workplace remote
+  python scraper.py --source indeed --keywords "SEO" --location "Bangalore" --country in --max-jobs 25
         """,
     )
 
     parser.add_argument(
         "--source",
-        choices=["linkedin", "naukri"],
+        choices=["linkedin", "naukri", "indeed"],
         default="linkedin",
         help="Job board to scrape (default: linkedin)",
     )
     parser.add_argument("--keywords", required=True, help='Job title or keyword, e.g. "software engineer"')
     parser.add_argument("--location", required=True, help='Location, e.g. "bangalore", "Remote", "India"')
+    parser.add_argument(
+        "--country",
+        default="in",
+        help="Indeed country code (default: in). Examples: in, us, uk, ca, au",
+    )
     parser.add_argument("--max-jobs", type=int, default=25, metavar="N", help="Maximum jobs to fetch (default: 25)")
     parser.add_argument("--job-type", choices=list(JOB_TYPE_MAP.keys()), default=None, help="LinkedIn: employment type")
     parser.add_argument(

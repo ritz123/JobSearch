@@ -7,13 +7,16 @@ dependencies = [
     "python-dotenv",
     "pandas",
     "tabulate",
-    "streamlit",
-    "plotly",
+    "fastapi",
+    "uvicorn[standard]",
+    "certifi",
+    "openpyxl",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "httpx>=0.27",
 ]
 
 [tool.uv]

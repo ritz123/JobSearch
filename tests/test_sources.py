@@ -17,7 +17,9 @@ from sources.naukri import NaukriSource, sanitize_naukri_location  # noqa: E402
 def test_get_adapter_linkedin_and_naukri():
     assert get_adapter("linkedin").name == "linkedin"
     assert get_adapter("naukri").name == "naukri"
+    assert get_adapter("indeed").name == "indeed"
     assert "naukri" in get_adapter("naukri").actor_id
+    assert "indeed" in get_adapter("indeed").actor_id
 
 
 def test_sanitize_naukri_location_strips_linkedin_style():
@@ -177,3 +179,56 @@ def test_query_jobs_posted_within_filters_recent(tmp_path):
     assert len(week) == 1
     month = query_jobs(posted_within="month", db_path=db)
     assert len(month) == 2
+
+
+def test_indeed_build_input_and_normalize():
+    from sources.indeed import IndeedSource, normalize_indeed_country
+
+    assert normalize_indeed_country("India") == "in"
+    assert normalize_indeed_country("USA") == "us"
+
+    args = SimpleNamespace(
+        keywords="SEO",
+        location="Bangalore",
+        country="in",
+        max_jobs=20,
+        workplace="remote",
+        job_type="full_time",
+        date_posted="week",
+        sort_recent=True,
+    )
+    run_input = IndeedSource().build_input(args)
+    assert run_input["query"] == "SEO"
+    assert run_input["location"] == "Bangalore"
+    assert run_input["country"] == "in"
+    assert run_input["maxRows"] == 20
+    assert run_input["remote"] == "remote"
+    assert run_input["jobType"] == "fulltime"
+    assert run_input["fromDays"] == "7"
+    assert run_input["sort"] == "date"
+
+    items = IndeedSource().normalize_items(
+        [
+            {
+                "title": "SEO Analyst",
+                "companyName": "Acme",
+                "jobKey": "abc123",
+                "jobUrl": "https://www.indeed.com/viewjob?jk=abc123",
+                "isRemote": True,
+                "jobType": ["Full-time", "Remote"],
+                "location": {"formattedAddressShort": "Bengaluru, Karnataka"},
+                "age": "2 days ago",
+                "salary": {"salaryText": "₹5L - ₹8L"},
+                "descriptionText": "Own organic search.",
+                "companyUrl": "https://www.indeed.com/cmp/Acme",
+            }
+        ]
+    )
+    assert len(items) == 1
+    job = items[0]
+    assert job["source"] == "indeed"
+    assert job["id"] == "abc123"
+    assert job["title"] == "SEO Analyst"
+    assert job["location"] == "Bengaluru, Karnataka"
+    assert job["workplaceType"] == "remote"
+    assert job["salary"] == "₹5L - ₹8L"

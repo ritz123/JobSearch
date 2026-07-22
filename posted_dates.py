@@ -1,4 +1,4 @@
-"""Helpers for LinkedIn postedAt values (relative strings and absolute ISO dates)."""
+"""Helpers for job postedAt values (relative strings and absolute ISO dates)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 _RELATIVE_PUBLISHED = re.compile(
-    r"^\s*(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months)\s+ago\s*$",
+    r"^\s*(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s+ago\s*$",
     re.IGNORECASE,
 )
 
@@ -19,15 +19,39 @@ _UNIT_SECONDS = {
     "days": 86400,
     "week": 604800,
     "weeks": 604800,
-    "month": 2592000,  # ~30 days — LinkedIn rounds coarsely
+    "month": 2592000,  # ~30 days — boards round coarsely
     "months": 2592000,
+    "year": 31536000,
+    "years": 31536000,
 }
+
+_JUST_POSTED = frozenset(
+    {
+        "just now",
+        "now",
+        "today",
+        "just posted",
+        "posted today",
+    }
+)
+
+# Naukri/etc. hiring-window phrases — not a publish date
+_NON_PUBLISHED = re.compile(
+    r"^\s*starts?\s+(in|within)\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_iso(value: str) -> datetime | None:
     text = value.strip()
     if not text:
         return None
+    # Date-only YYYY-MM-DD
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
     try:
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
@@ -40,13 +64,13 @@ def _parse_iso(value: str) -> datetime | None:
 
 
 def relative_age_seconds(value: object) -> float | None:
-    """Parse LinkedIn-style '2 days ago' into age in seconds. None if not relative."""
+    """Parse board-style '2 days ago' into age in seconds. None if not relative."""
     if value is None:
         return None
     text = str(value).strip()
     if not text:
         return None
-    if text.lower() in {"just now", "now", "today"}:
+    if text.lower() in _JUST_POSTED:
         return 0.0
     match = _RELATIVE_PUBLISHED.match(text)
     if not match:
@@ -62,15 +86,18 @@ def to_absolute_published(
 ) -> datetime | None:
     """Resolve postedAt to an absolute UTC datetime.
 
-    - ISO timestamps are parsed directly.
-    - Relative strings ('3 days ago') are subtracted from ``reference``
-      (scrape time). LinkedIn rounds these, so the result is approximate
-      but stable (unlike leaving the relative string frozen in the DB).
+    - ISO timestamps / YYYY-MM-DD are parsed directly.
+    - Relative strings ('3 days ago', 'Just posted') are subtracted from
+      ``reference`` (scrape time).
+    - Non-date phrases ('Starts within 1 month') return None.
     """
     if posted_at is None:
         return None
     text = str(posted_at).strip()
     if not text:
+        return None
+
+    if _NON_PUBLISHED.match(text):
         return None
 
     absolute = _parse_iso(text)
@@ -92,6 +119,32 @@ def to_absolute_published(
     return ref - timedelta(seconds=age)
 
 
+def normalize_published_for_storage(
+    posted_at: object,
+    reference: datetime | str | None = None,
+) -> str | None:
+    """Store-only form: UTC ISO-8601 string, or None if unknown."""
+    absolute = to_absolute_published(posted_at, reference)
+    if absolute is None:
+        return None
+    return absolute.isoformat()
+
+
+def format_published_ago(
+    posted_at: object,
+    reference: datetime | str | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """UI-friendly relative age only, e.g. '3 days ago'."""
+    absolute = to_absolute_published(posted_at, reference)
+    if absolute is None:
+        return "Unknown"
+    now = now or datetime.now(timezone.utc)
+    age = max(0.0, (now - absolute).total_seconds())
+    return _format_relative(age)
+
+
 def format_published_display(
     posted_at: object,
     reference: datetime | str | None = None,
@@ -102,7 +155,9 @@ def format_published_display(
     absolute = to_absolute_published(posted_at, reference)
     if absolute is None:
         text = "" if posted_at is None else str(posted_at).strip()
-        return text or "Unknown"
+        if text and not _NON_PUBLISHED.match(text):
+            return text
+        return "Unknown"
 
     now = now or datetime.now(timezone.utc)
     age = max(0.0, (now - absolute).total_seconds())
@@ -117,7 +172,7 @@ def _format_relative(age_seconds: float) -> str:
     if minutes < 60:
         return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
     hours = int(age_seconds // 3600)
-    if hours < 48:
+    if hours < 24:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     days = int(age_seconds // 86400)
     if days < 14:
@@ -126,7 +181,10 @@ def _format_relative(age_seconds: float) -> str:
     if weeks < 8:
         return f"{weeks} week{'s' if weeks != 1 else ''} ago"
     months = max(1, int(days // 30))
-    return f"{months} month{'s' if months != 1 else ''} ago"
+    if months < 24:
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = max(1, int(days // 365))
+    return f"{years} year{'s' if years != 1 else ''} ago"
 
 
 def sort_key_published(

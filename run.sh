@@ -1,1 +1,1 @@
-run_dashboard.sh
+run_web.sh

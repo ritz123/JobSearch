@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from database import DEFAULT_DB, get_stats, init_db, query_jobs
+from database import DEFAULT_DB, get_stats, init_db, purge_old_jobs, query_jobs
+from posted_dates import format_published_ago
 
 # ---------------------------------------------------------------------------
 # Display helpers
@@ -61,7 +62,11 @@ def print_jobs(rows, limit: int) -> None:
         return
 
     display = ["title", "company", "location", "workplace_type", "contract_type", "published_at", "salary"]
-    data = [{col: (row[col] or "") for col in display} for row in rows]
+    data = []
+    for row in rows:
+        item = {col: (row[col] or "") for col in display}
+        item["published_at"] = format_published_ago(row["published_at"], row["scraped_at"])
+        data.append(item)
     df = pd.DataFrame(data)
     df.index = range(1, len(df) + 1)
 
@@ -109,6 +114,7 @@ Commands:
   stats   Show database summary (total jobs, top companies, recent searches)
   list    Print a table of matching jobs in the terminal
   export  Export matching jobs to a CSV or JSON file
+  purge   Delete jobs posted (or scraped) more than N days ago
 
 Examples:
   python query.py stats
@@ -116,12 +122,13 @@ Examples:
   python query.py list --company "Stripe" --limit 50
   python query.py export --keyword "data scientist" --output ds_jobs.csv
   python query.py export --output all_jobs.json
+  python query.py purge --days 7
         """,
     )
 
     parser.add_argument(
         "command",
-        choices=["stats", "list", "export"],
+        choices=["stats", "list", "export", "purge"],
         help="Action to perform",
     )
 
@@ -131,6 +138,12 @@ Examples:
     parser.add_argument("--location", default=None, help="Filter by location")
     parser.add_argument("--workplace", default=None, help="Filter by workplace type (remote, on_site, hybrid)")
     parser.add_argument("--limit", type=int, default=50, help="Max rows to return (default: 50)")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        help="For purge: delete jobs older than this many days (default: 7)",
+    )
 
     # Export-only
     parser.add_argument("--output", default="export.csv", metavar="FILE", help="Output file for export command (.csv or .json)")
@@ -154,6 +167,10 @@ def main() -> None:
 
     if args.command == "stats":
         print_stats(db_path)
+
+    elif args.command == "purge":
+        deleted = purge_old_jobs(older_than_days=args.days, db_path=db_path)
+        print(f"Deleted {deleted} job(s) older than {args.days} day(s).")
 
     elif args.command in ("list", "export"):
         rows = query_jobs(

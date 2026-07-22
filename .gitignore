@@ -20,3 +20,7 @@ build/
 *.csv
 *.json
 !.env.example
+
+# Node / Vite
+web/node_modules/
+web/dist/

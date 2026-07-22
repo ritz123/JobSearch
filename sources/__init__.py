@@ -14,12 +14,14 @@ class SourceAdapter(Protocol):
 
 
 def get_adapter(source: str) -> SourceAdapter:
+    from sources.indeed import IndeedSource
     from sources.linkedin import LinkedInSource
     from sources.naukri import NaukriSource
 
     adapters = {
         LinkedInSource.name: LinkedInSource(),
         NaukriSource.name: NaukriSource(),
+        IndeedSource.name: IndeedSource(),
     }
     try:
         return adapters[source]

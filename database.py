@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from posted_dates import relative_age_seconds, to_absolute_published
+from posted_dates import normalize_published_for_storage, to_absolute_published
 
 DEFAULT_DB = Path(__file__).parent / "jobs.db"
 
@@ -54,6 +54,35 @@ CREATE INDEX IF NOT EXISTS idx_jobs_title    ON jobs(title);
 CREATE INDEX IF NOT EXISTS idx_jobs_company  ON jobs(company);
 CREATE INDEX IF NOT EXISTS idx_jobs_location ON jobs(location);
 CREATE INDEX IF NOT EXISTS idx_jobs_search   ON jobs(search_id);
+
+CREATE TABLE IF NOT EXISTS city_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    city             TEXT    NOT NULL,
+    filters          TEXT,
+    max_companies    INTEGER,
+    companies_found  INTEGER,
+    jobs_found       INTEGER,
+    ran_at           TEXT    NOT NULL,
+    status           TEXT    NOT NULL,
+    notes            TEXT
+);
+
+CREATE TABLE IF NOT EXISTS companies (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    osm_id        TEXT,
+    name          TEXT    NOT NULL,
+    website       TEXT    NOT NULL UNIQUE,
+    city          TEXT,
+    lat           REAL,
+    lon           REAL,
+    tags          TEXT,
+    careers_url   TEXT,
+    last_seen_at  TEXT,
+    created_at    TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_companies_city ON companies(city);
+CREATE INDEX IF NOT EXISTS idx_companies_name ON companies(name);
 """
 
 # ---------------------------------------------------------------------------
@@ -82,6 +111,7 @@ def init_db(db_path: Path = DEFAULT_DB) -> None:
         conn.executescript(DDL)
     migrate_relative_published_at(db_path)
     migrate_job_source(db_path)
+    migrate_city_careers(db_path)
 
 
 def migrate_job_source(db_path: Path = DEFAULT_DB) -> None:
@@ -109,10 +139,31 @@ def migrate_job_source(db_path: Path = DEFAULT_DB) -> None:
         )
 
 
-def migrate_relative_published_at(db_path: Path = DEFAULT_DB) -> int:
-    """Convert frozen 'N days ago' strings into absolute ISO timestamps.
+def migrate_city_careers(db_path: Path = DEFAULT_DB) -> None:
+    """Add city_run_id / company_id columns for company-site jobs."""
+    with get_conn(db_path) as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "city_run_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN city_run_id INTEGER")
+        if "company_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN company_id INTEGER")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_city_run ON jobs(city_run_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_company_id ON jobs(company_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_scraped_at ON jobs(scraped_at)"
+        )
 
-    Uses each row's scraped_at as the reference time. Safe to run repeatedly.
+
+def migrate_relative_published_at(db_path: Path = DEFAULT_DB) -> int:
+    """Normalize published_at to UTC ISO (or NULL for non-dates).
+
+    Converts relative strings and date-only values using scraped_at as reference.
+    Clears values that are not publish dates (e.g. 'Starts within 1 month').
+    Safe to run repeatedly.
     """
     updated = 0
     with get_conn(db_path) as conn:
@@ -121,14 +172,18 @@ def migrate_relative_published_at(db_path: Path = DEFAULT_DB) -> int:
             "WHERE published_at IS NOT NULL AND published_at != ''"
         ).fetchall()
         for row in rows:
-            if relative_age_seconds(row["published_at"]) is None:
+            raw = row["published_at"]
+            # Already uniform ISO with timezone — leave alone.
+            if isinstance(raw, str) and re.match(
+                r"^\d{4}-\d{2}-\d{2}T.*([+-]\d{2}:\d{2}|Z)$", raw.strip()
+            ):
                 continue
-            absolute = to_absolute_published(row["published_at"], row["scraped_at"])
-            if absolute is None:
+            normalized = normalize_published_for_storage(raw, row["scraped_at"])
+            if normalized == raw:
                 continue
             conn.execute(
                 "UPDATE jobs SET published_at = ? WHERE id = ?",
-                (absolute.isoformat(), row["id"]),
+                (normalized, row["id"]),
             )
             updated += 1
     return updated
@@ -206,8 +261,9 @@ def save_jobs(items: list[dict], search_id: int, db_path: Path = DEFAULT_DB) -> 
             job_url = item.get("url") or item.get("jobUrl") or ""
             job_id = _namespaced_job_id(source, item.get("id"), job_url)
 
-            published = to_absolute_published(item.get("postedAt"), scraped_at)
-            published_value = published.isoformat() if published else item.get("postedAt")
+            published_value = normalize_published_for_storage(
+                item.get("postedAt"), scraped_at
+            )
 
             cur = conn.execute(
                 """
@@ -241,6 +297,274 @@ def save_jobs(items: list[dict], search_id: int, db_path: Path = DEFAULT_DB) -> 
 
     return inserted, skipped
 
+
+def create_city_run(
+    city: str,
+    filters: dict,
+    max_companies: int,
+    db_path: Path = DEFAULT_DB,
+) -> int:
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO city_runs
+                (city, filters, max_companies, companies_found, jobs_found, ran_at, status, notes)
+            VALUES (?, ?, ?, 0, 0, ?, 'running', NULL)
+            """,
+            (city, json.dumps(filters), max_companies, _now()),
+        )
+        return cur.lastrowid
+
+
+def finish_city_run(
+    run_id: int,
+    *,
+    status: str,
+    companies_found: int,
+    jobs_found: int,
+    notes: str | None = None,
+    db_path: Path = DEFAULT_DB,
+) -> None:
+    with get_conn(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE city_runs
+            SET status = ?, companies_found = ?, jobs_found = ?, notes = ?
+            WHERE id = ?
+            """,
+            (status, companies_found, jobs_found, notes, run_id),
+        )
+
+
+def upsert_company(company: dict, db_path: Path = DEFAULT_DB) -> int:
+    """Insert or update a company by normalized website; return row id."""
+    from careers.extract import normalize_website
+
+    website = normalize_website(company.get("website") or "")
+    if not website:
+        raise ValueError("company website is required")
+    now = _now()
+    tags = company.get("tags")
+    tags_json = json.dumps(tags) if isinstance(tags, (dict, list)) else tags
+    with get_conn(db_path) as conn:
+        existing = conn.execute(
+            "SELECT id FROM companies WHERE website = ?", (website,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE companies
+                SET osm_id = COALESCE(?, osm_id),
+                    name = ?,
+                    city = COALESCE(?, city),
+                    lat = COALESCE(?, lat),
+                    lon = COALESCE(?, lon),
+                    tags = COALESCE(?, tags),
+                    careers_url = COALESCE(?, careers_url),
+                    last_seen_at = ?
+                WHERE id = ?
+                """,
+                (
+                    company.get("osm_id"),
+                    company.get("name"),
+                    company.get("city"),
+                    company.get("lat"),
+                    company.get("lon"),
+                    tags_json,
+                    company.get("careers_url"),
+                    now,
+                    existing["id"],
+                ),
+            )
+            return int(existing["id"])
+        cur = conn.execute(
+            """
+            INSERT INTO companies
+                (osm_id, name, website, city, lat, lon, tags, careers_url, last_seen_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                company.get("osm_id"),
+                company.get("name"),
+                website,
+                company.get("city"),
+                company.get("lat"),
+                company.get("lon"),
+                tags_json,
+                company.get("careers_url"),
+                now,
+                now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def set_company_careers_url(
+    company_id: int, careers_url: str | None, db_path: Path = DEFAULT_DB
+) -> None:
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "UPDATE companies SET careers_url = ?, last_seen_at = ? WHERE id = ?",
+            (careers_url, _now(), company_id),
+        )
+
+
+def save_company_site_jobs(
+    items: list[dict],
+    city_run_id: int,
+    db_path: Path = DEFAULT_DB,
+) -> tuple[int, int]:
+    """Insert new company-site jobs or bump scraped_at on duplicates."""
+    inserted = 0
+    refreshed = 0
+    scraped_at = _now()
+
+    with get_conn(db_path) as conn:
+        for item in items:
+            job_url = item.get("url") or ""
+            job_id = item.get("id") or _namespaced_job_id(
+                "company_site", None, job_url
+            )
+            published_value = normalize_published_for_storage(
+                item.get("postedAt"), scraped_at
+            )
+            company_id = item.get("company_id")
+
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO jobs
+                    (job_id, source, title, company, location, workplace_type, contract_type,
+                     published_at, salary, job_url, company_url, description,
+                     search_id, scraped_at, city_run_id, company_id)
+                VALUES (?, 'company_site', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    item.get("title"),
+                    item.get("companyName"),
+                    item.get("location"),
+                    item.get("workplaceType"),
+                    item.get("employmentType"),
+                    published_value,
+                    item.get("salary"),
+                    job_url,
+                    item.get("companyUrl"),
+                    item.get("descriptionText"),
+                    scraped_at,
+                    city_run_id,
+                    company_id,
+                ),
+            )
+            if cur.rowcount:
+                inserted += 1
+            else:
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET scraped_at = ?,
+                        city_run_id = ?,
+                        title = COALESCE(?, title),
+                        location = COALESCE(?, location),
+                        description = COALESCE(?, description),
+                        job_url = COALESCE(?, job_url)
+                    WHERE job_id = ?
+                    """,
+                    (
+                        scraped_at,
+                        city_run_id,
+                        item.get("title"),
+                        item.get("location"),
+                        item.get("descriptionText"),
+                        job_url or None,
+                        job_id,
+                    ),
+                )
+                refreshed += 1
+
+    return inserted, refreshed
+
+
+def query_companies(
+    city: str | None = None,
+    limit: int = 100,
+    db_path: Path = DEFAULT_DB,
+) -> list[sqlite3.Row]:
+    clauses = []
+    params: list = []
+    if city:
+        clauses.append("city LIKE ?")
+        params.append(f"%{city}%")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = f"SELECT * FROM companies {where} ORDER BY last_seen_at DESC LIMIT ?"
+    params.append(limit)
+    with get_conn(db_path) as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def get_recent_city_runs(limit: int = 20, db_path: Path = DEFAULT_DB) -> list[dict]:
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, city, filters, max_companies, companies_found, jobs_found,
+                   ran_at, status, notes
+            FROM city_runs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    results = []
+    for row in rows:
+        item = dict(row)
+        raw = item.get("filters")
+        try:
+            item["filters"] = json.loads(raw) if raw else {}
+        except (TypeError, json.JSONDecodeError):
+            item["filters"] = {}
+        results.append(item)
+    return results
+
+
+def purge_old_jobs(
+    older_than_days: int = 7,
+    db_path: Path = DEFAULT_DB,
+) -> int:
+    """Delete jobs whose posting date (or scrape date fallback) is older than N days.
+
+    Uses ``published_at`` when it can be resolved to an absolute timestamp;
+    otherwise falls back to ``scraped_at`` so undated rows still age out.
+    """
+    if older_than_days < 1:
+        raise ValueError("older_than_days must be >= 1")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(older_than_days))
+    to_delete: list[int] = []
+
+    with get_conn(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, published_at, scraped_at FROM jobs"
+        ).fetchall()
+        for row in rows:
+            absolute = to_absolute_published(row["published_at"], row["scraped_at"])
+            if absolute is None:
+                scraped_raw = row["scraped_at"] or ""
+                try:
+                    absolute = datetime.fromisoformat(
+                        scraped_raw.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    continue
+                if absolute.tzinfo is None:
+                    absolute = absolute.replace(tzinfo=timezone.utc)
+            if absolute < cutoff:
+                to_delete.append(int(row["id"]))
+
+        for job_id in to_delete:
+            conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+    return len(to_delete)
+
+
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
@@ -262,6 +586,7 @@ def query_jobs(
     workplace: str | None = None,
     source: str | None = None,
     posted_within: str | None = None,
+    scraped_within_days: int | None = None,
     limit: int = 50,
     db_path: Path = DEFAULT_DB,
 ) -> list[sqlite3.Row]:
@@ -269,6 +594,9 @@ def query_jobs(
 
     ``posted_within`` is one of POSTED_WITHIN_OPTIONS keys (``any`` / ``24h`` /
     ``3d`` / ``week`` / ``month``), or None for no recency filter.
+
+    ``scraped_within_days`` filters by when the job was last seen/scraped
+    (used by the city-careers soft-recent UI).
     """
     clauses = []
     params: list = []
@@ -311,8 +639,24 @@ def query_jobs(
         clauses.append("j.published_at IS NOT NULL AND j.published_at >= ?")
         params.append(cutoff)
 
+    if scraped_within_days and scraped_within_days > 0:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=int(scraped_within_days))
+        ).isoformat()
+        clauses.append("j.scraped_at >= ?")
+        params.append(cutoff)
+
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    order = "j.published_at DESC, j.id DESC" if hours else "j.id DESC"
+    if scraped_within_days and scraped_within_days > 0:
+        # City-careers soft-recent browse: last seen first.
+        order = "j.scraped_at DESC, j.id DESC"
+    else:
+        # Jobs Explorer default: newest published first; unknowns last.
+        order = (
+            "CASE WHEN j.published_at IS NULL OR j.published_at = '' "
+            "THEN 1 ELSE 0 END ASC, "
+            "j.published_at DESC, j.id DESC"
+        )
     sql = f"""
         SELECT j.*, s.keywords AS search_keywords, s.location AS search_location
         FROM jobs j
