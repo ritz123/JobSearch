@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  downloadJobsXls,
+  downloadJobsXlsx,
   fetchJobs,
   fetchStats,
   purgeOldJobs,
@@ -93,14 +93,14 @@ export default function JobsPage() {
     }
   }
 
-  const onDownloadXls = async () => {
+  const onDownloadXlsx = async () => {
     // Use the form values currently on screen (apply them to the table too).
     setFilters(draft)
     setDownloading(true)
     setError('')
     setMessage('')
     try {
-      await downloadJobsXls(exportParams(draft), 'jobs_filtered.xlsx')
+      await downloadJobsXlsx(exportParams(draft), 'jobs_filtered.xlsx')
       setMessage('Downloaded filtered jobs as Excel (.xlsx).')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -200,10 +200,10 @@ export default function JobsPage() {
         <button type="submit">Apply Filters</button>
         <button
           type="button"
-          onClick={() => void onDownloadXls()}
+          onClick={() => void onDownloadXlsx()}
           disabled={downloading}
         >
-          {downloading ? 'Downloading…' : 'Download XLS'}
+          {downloading ? 'Downloading…' : 'Download .xlsx'}
         </button>
       </form>
 

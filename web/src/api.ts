@@ -84,8 +84,8 @@ export function jobsExportUrl(params: Record<string, string | number | undefined
   return qs ? `/api/jobs/export.xlsx?${qs}` : '/api/jobs/export.xlsx'
 }
 
-/** Fetch filtered jobs as Excel and trigger a browser download. */
-export async function downloadJobsXls(
+/** Fetch filtered jobs as Excel (.xlsx) and trigger a browser download. */
+export async function downloadJobsXlsx(
   params: Record<string, string | number | undefined>,
   filename = 'jobs_filtered.xlsx',
 ) {

@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +33,7 @@ from database import (  # noqa: E402
     query_companies,
     query_jobs,
 )
+from exports import build_jobs_xlsx  # noqa: E402
 from posted_dates import format_published_ago  # noqa: E402
 from scraper import run_actor, save_to_db  # noqa: E402
 from sources import get_adapter  # noqa: E402
@@ -125,7 +125,7 @@ def api_jobs_export_xlsx(
     posted_within: str | None = None,
     limit: int = Query(2000, ge=1, le=5000),
 ):
-    """Download filtered jobs as Excel (.xlsx)."""
+    """Download filtered jobs as Excel (.xlsx) with clickable URL hyperlinks."""
     rows = query_jobs(
         keyword=keyword or None,
         company=company or None,
@@ -154,11 +154,7 @@ def api_jobs_export_xlsx(
                 "Company URL": item.get("company_url"),
             }
         )
-    df = pd.DataFrame.from_records(records)
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Jobs")
-    buf.seek(0)
+    buf = io.BytesIO(build_jobs_xlsx(records))
     headers = {
         "Content-Disposition": 'attachment; filename="jobs_export.xlsx"',
     }
